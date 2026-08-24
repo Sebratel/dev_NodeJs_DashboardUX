@@ -1,0 +1,14 @@
+{
+  "name": "consolidador-automation",
+  "version": "1.0.0",
+  "description": "Script auxiliar para autenticar na Matrix Sebratel e exportar o relatorio de atendimento em CSV",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "postinstall": "playwright install chromium",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}
