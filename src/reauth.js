@@ -61,11 +61,18 @@ export function reauthStatus() {
 export async function startReauth() {
   if (state.active) return reauthStatus();
 
-  killStrayProcesses();
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
+  // Precisa ser síncrono, ANTES de qualquer await - senão duas chamadas
+  // POST /reauth/start em sequência rápida (ex.: duplo clique, ou o
+  // usuário recarregando a página e clicando de novo antes da primeira
+  // resposta voltar) passam ambas pelo "if (state.active)" acima enquanto
+  // ainda é false, e cada uma sobe seu próprio Xvfb/x11vnc/websockify -
+  // exatamente o problema de processos duplicados que killStrayProcesses
+  // devia evitar.
   state.active = true;
   state.loggedIn = false;
+
+  killStrayProcesses();
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
   try {
     spawnProc('Xvfb', [DISPLAY, '-screen', '0', '1280x800x24']);
