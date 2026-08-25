@@ -1,0 +1,27 @@
+# Stack para Portainer. Servico HTTP proprio (porta 3212), chamado pelo BFF
+# via REST (ver bff/.../HttpReportJobRunner.java e AUTOMATION_BASE_URL).
+#
+# IMPORTANTE - login SSO manual: este servico roda headless (sem display) e
+# NAO consegue completar o login interativo da Matrix quando a sessao
+# expira. Para (re)autenticar: rode "npm start -- --from=dd-MM-yyyy
+# --to=dd-MM-yyyy" localmente (com display), usando o MESMO diretorio que
+# o volume automation-auth abaixo, depois copie/atualize esse volume no
+# host do Portainer.
+services:
+  automation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3212:3212"
+    environment:
+      PORT: "3212"
+      DATA_HUB_TOKEN: ${DATA_HUB_TOKEN}
+    volumes:
+      - automation-auth:/app/.auth
+      - automation-downloads:/app/downloads
+    restart: unless-stopped
+
+volumes:
+  automation-auth:
+  automation-downloads:
