@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { openForManualLogin, isLoggedIn } from './session.js';
 import { config } from './config.js';
 
@@ -36,12 +36,33 @@ function killAllProcs() {
   state.procs = [];
 }
 
+/**
+ * Se o processo Node reiniciar (crash, redeploy) sem passar por
+ * stopReauth(), Xvfb/x11vnc/websockify/Chromium ficam orfaos rodando -
+ * state.procs (em memoria) esquece deles, mas eles continuam disputando
+ * as mesmas portas (5900/6080) e o mesmo profileDir com a proxima
+ * chamada, causando conexoes que ficam presas em "Connecting..." no
+ * noVNC. Mata por nome antes de subir um conjunto novo, para garantir
+ * que so exista UM de cada.
+ */
+function killStrayProcesses() {
+  spawnSync('pkill', ['-9', '-f', 'Xvfb :99']);
+  spawnSync('pkill', ['-9', '-f', 'x11vnc']);
+  spawnSync('pkill', ['-9', '-f', 'websockify']);
+  // Chromium headed do playwright: identificado pelo profileDir na linha
+  // de comando (--user-data-dir=...), nao ha flag "--headless=false" real.
+  spawnSync('pkill', ['-9', '-f', config.profileDir]);
+}
+
 export function reauthStatus() {
   return { active: state.active, loggedIn: state.loggedIn };
 }
 
 export async function startReauth() {
   if (state.active) return reauthStatus();
+
+  killStrayProcesses();
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
   state.active = true;
   state.loggedIn = false;
