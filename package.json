@@ -6,9 +6,11 @@
   "private": true,
   "scripts": {
     "postinstall": "playwright install chromium",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "serve": "node src/server.js"
   },
   "dependencies": {
+    "express": "^4.21.0",
     "playwright": "^1.48.0"
   }
 }
