@@ -2,11 +2,11 @@
 # via REST (ver bff/.../HttpReportJobRunner.java e AUTOMATION_BASE_URL).
 #
 # IMPORTANTE - login SSO manual: este servico roda headless (sem display) e
-# NAO consegue completar o login interativo da Matrix quando a sessao
-# expira. Para (re)autenticar: rode "npm start -- --from=dd-MM-yyyy
-# --to=dd-MM-yyyy" localmente (com display), usando o MESMO diretorio que
-# o volume automation-auth abaixo, depois copie/atualize esse volume no
-# host do Portainer.
+# NAO consegue completar o login interativo da Matrix sozinho quando a
+# sessao expira. Para reautenticar, use o botao "Reautenticar" no frontend
+# (POST /reauth/start neste servico) - ele abre um Chromium HEADED num
+# display virtual e expõe a tela via noVNC (porta 6080), direto no browser
+# do usuario. Nao precisa de SSH nem de copiar volume manualmente.
 services:
   automation:
     build:
@@ -14,6 +14,9 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3212:3212"
+      # noVNC do fluxo de reautenticacao remota (ver src/reauth.js) -
+      # exposto so enquanto POST /reauth/start estiver ativo.
+      - "6080:6080"
     environment:
       PORT: "3212"
       DATA_HUB_TOKEN: ${DATA_HUB_TOKEN}

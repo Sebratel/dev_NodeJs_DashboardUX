@@ -1,5 +1,6 @@
 import express from 'express';
 import { createJob, getJob, listJobs } from './jobQueue.js';
+import { startReauth, stopReauth, reauthStatus } from './reauth.js';
 
 const PORT = Number(process.env.PORT ?? 3212);
 
@@ -69,6 +70,22 @@ app.get('/jobs/:id/download/:report', (req, res) => {
   }
 
   res.download(filePath);
+});
+
+app.post('/reauth/start', async (req, res) => {
+  try {
+    res.json(await startReauth());
+  } catch (err) {
+    res.status(500).json({ error: err?.message ?? String(err) });
+  }
+});
+
+app.get('/reauth/status', (req, res) => {
+  res.json(reauthStatus());
+});
+
+app.post('/reauth/stop', async (req, res) => {
+  res.json(await stopReauth());
 });
 
 app.listen(PORT, () => {

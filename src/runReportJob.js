@@ -71,9 +71,8 @@ export async function runReportJob(filters) {
   if (!loggedIn) {
     await context.close();
     throw new Error(
-      'Sessao da Matrix nao autenticada. Este servico roda headless e nao pode abrir um ' +
-        'navegador para login manual - reautentique rodando "npm start -- --from=... --to=..." ' +
-        'localmente (com display), usando o mesmo profile (volume automation-auth), e tente de novo.',
+      'Sessao da Matrix nao autenticada. Use o botao "Reautenticar" para logar pelo browser ' +
+        '(POST /reauth/start) e tente gerar o relatorio de novo.',
     );
   }
 
