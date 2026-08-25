@@ -78,7 +78,18 @@ export async function startReauth() {
     spawnProc('Xvfb', [DISPLAY, '-screen', '0', '1280x800x24']);
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    spawnProc('x11vnc', ['-display', DISPLAY, '-forever', '-nopw', '-quiet', '-rfbport', String(VNC_PORT)]);
+    // -noxdamage: Xvfb nao implementa a extensao XDAMAGE corretamente: sem
+    // essa flag o x11vnc entra num loop de polling a ~100% de CPU e trava
+    // (nunca completa o handshake RFB com novos clientes - noVNC preso em
+    // "Connecting..." para sempre). Sintoma observado em producao.
+    spawnProc('x11vnc', [
+      '-display', DISPLAY,
+      '-forever',
+      '-nopw',
+      '-quiet',
+      '-noxdamage',
+      '-rfbport', String(VNC_PORT),
+    ]);
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     spawnProc('websockify', ['--web=/usr/share/novnc', String(NOVNC_PORT), `localhost:${VNC_PORT}`]);
