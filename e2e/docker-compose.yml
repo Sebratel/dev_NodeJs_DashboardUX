@@ -1,0 +1,56 @@
+# Stack local para e2e - sobe automation + bff + frontend na MESMA rede,
+# ligados pelos nomes de servico (como cada um roda em stacks separadas no
+# Portainer, isso simula a comunicacao entre containers de producao sem
+# precisar do host real). Portas publicadas imitam as portas de producao
+# (3210 bff, 3211 frontend, 3212 automation, 6080 noVNC), entao os testes
+# (tests/) e o proprio browser do usuario acessam tudo via localhost.
+#
+# IMPORTANTE: assume que os repos bff e frontend-react estao clonados como
+# irmaos de automation (mesmo layout de sempre: consolidador/{automation,
+# bff,frontend-react}) - os paths ../../bff e ../../frontend-react abaixo
+# dependem disso.
+#
+# Uso: ver run.sh neste diretorio.
+services:
+  automation:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "3212:3212"
+      - "6080:6080"
+    environment:
+      DATA_HUB_TOKEN: "dummy-e2e-token"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3212/health', r => process.exit(r.statusCode===200?0:1)).on('error', () => process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  bff:
+    build:
+      context: ../../bff
+      dockerfile: Dockerfile
+    ports:
+      - "3210:3210"
+    environment:
+      SERVER_PORT: "3210"
+      AUTOMATION_BASE_URL: "http://automation:3212"
+      # automation:3212 so existe dentro desta rede - o browser do usuario
+      # (rodando no host) precisa da URL publica do noVNC em localhost.
+      AUTOMATION_PUBLIC_HOST: "localhost"
+      APP_CORS_ALLOWED_ORIGINS: "http://localhost:3211"
+    depends_on:
+      automation:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../../frontend-react
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: "http://localhost:3210/api"
+    ports:
+      - "3211:3211"
+    depends_on:
+      - bff
