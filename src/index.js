@@ -1,9 +1,7 @@
 import { checkLogin, openForManualLogin, isLoggedIn } from './session.js';
-import { exportCsv } from './exportCsv.js';
-import { exportDataHubReport } from './exportDataHub.js';
 import { createGiveUpSignal } from './giveUp.js';
 import { config } from './config.js';
-import { REPORT_DEFINITIONS, HSM_POS_INSTALACAO_REPORT } from './reportDefinitions.js';
+import { exportAllReports } from './runReportJob.js';
 
 function parseArgs() {
   const raw = Object.fromEntries(
@@ -47,55 +45,6 @@ async function waitForLoginInSameContext(page) {
 
   giveUp.dispose();
   return result === 'gave-up';
-}
-
-/**
- * Roda os tres relatorios (atendimento + HSM + HSM CX Pos-Instalacao) de
- * forma assincrona, em paralelo. Atendimento e HSM cada um em sua propria
- * aba (Page) do MESMO contexto de browser - assim os dois compartilham a
- * mesma sessao autenticada (os cookies vivem no contexto, nao na aba) sem
- * disputar o profile Chromium, que so pode ser aberto por um processo por
- * vez. O terceiro relatorio nao usa Playwright/browser nenhum - vem de uma
- * API REST publica (Data Hub, ver exportDataHub.js) e roda como uma
- * promise HTTP independente, junto com as outras duas.
- *
- * Usa Promise.allSettled (nao Promise.all) DE PROPOSITO: com Promise.all,
- * a falha de UM relatorio rejeita a promise combinada imediatamente,
- * main() cai no catch e chama process.exit(1) - matando o processo Node
- * inteiro e abortando os OUTROS relatorios no meio, mesmo que estivessem
- * prestes a terminar com sucesso. allSettled deixa todos rodarem ate o
- * fim (sucesso ou falha) independentemente uns dos outros.
- */
-async function exportAllReports(context, atendimentoPage, filters) {
-  const hsmPage = await context.newPage();
-  await hsmPage.goto(`${config.baseUrl}${REPORT_DEFINITIONS.hsm.reportPath}`, {
-    waitUntil: 'domcontentloaded',
-  });
-
-  const [atendimentoResult, hsmResult, hsmPosInstalacaoResult] = await Promise.allSettled([
-    exportCsv(context, atendimentoPage, REPORT_DEFINITIONS.atendimento, filters),
-    exportCsv(context, hsmPage, REPORT_DEFINITIONS.hsm, filters),
-    exportDataHubReport(HSM_POS_INSTALACAO_REPORT, filters),
-  ]);
-
-  await hsmPage.close();
-
-  const describeError = (result) =>
-    result.status === 'rejected' ? (result.reason?.message ?? String(result.reason)) : null;
-
-  return {
-    files: {
-      atendimento: atendimentoResult.status === 'fulfilled' ? atendimentoResult.value : null,
-      hsm: hsmResult.status === 'fulfilled' ? hsmResult.value : null,
-      hsmPosInstalacao:
-        hsmPosInstalacaoResult.status === 'fulfilled' ? hsmPosInstalacaoResult.value : null,
-    },
-    errors: {
-      atendimento: describeError(atendimentoResult),
-      hsm: describeError(hsmResult),
-      hsmPosInstalacao: describeError(hsmPosInstalacaoResult),
-    },
-  };
 }
 
 async function main() {

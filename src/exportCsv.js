@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
 import { splitIntoMonthlyChunks } from './dateRange.js';
+import { reportProgress } from './progress.js';
 
 /**
  * Preenche o formulario de filtros e clica em "Filtrar" de verdade pela UI.
@@ -94,21 +95,6 @@ function stripHeader(buffer) {
   const newlineIndex = text.indexOf('\n');
   if (newlineIndex === -1) return Buffer.alloc(0);
   return Buffer.from(text.slice(newlineIndex + 1), 'utf-8');
-}
-
-/**
- * Emite uma linha de progresso em JSON no stdout, num formato fixo
- * ("PROGRESS {...}") para que um processo pai (o BFF Java, via
- * ProcessBuilder) consiga fazer parse do andamento sem depender de texto
- * livre. Ver bff/.../NodeProcessReportJobRunner.java, que le stdout linha a
- * linha e casa esse prefixo.
- *
- * O campo "report" identifica qual dos relatorios concorrentes gerou essa
- * atualizacao (ver REPORT_DEFINITIONS) - necessario desde que passamos a
- * rodar mais de um relatorio ao mesmo tempo (index.js).
- */
-function reportProgress(reportKey, percent, message) {
-  console.log(`PROGRESS ${JSON.stringify({ report: reportKey, percent, message })}`);
 }
 
 /**

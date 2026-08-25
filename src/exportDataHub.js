@@ -2,10 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
 import { fetchAllDataHubRows } from './dataHubClient.js';
-
-function reportProgress(reportKey, percent, message) {
-  console.log(`PROGRESS ${JSON.stringify({ report: reportKey, percent, message })}`);
-}
+import { reportProgress } from './progress.js';
 
 function parseDdMmYyyyHHmm(dateDdMmYyyy, timeHHmm) {
   const [day, month, year] = dateDdMmYyyy.split('-').map(Number);
