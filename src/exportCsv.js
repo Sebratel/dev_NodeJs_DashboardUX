@@ -10,7 +10,8 @@ import { splitIntoMonthlyChunks } from './dateRange.js';
  * servidor guarda algum estado de sessao nesse passo que o endpoint de
  * exportacao exige (sem isso o data64/... responde HTTP 500). O filtro em
  * si dispara um POST para /relatorio-atendimento/listarRelatorioAtendimentoAnalitico
- * (confirmado via log de rede), diferente do endpoint de export.
+ * (confirmado via log de rede, para o relatorio de atendimento), diferente
+ * do endpoint de export.
  */
 async function fillAndCommit(page, selector, value) {
   await page.fill(selector, value);
@@ -18,23 +19,25 @@ async function fillAndCommit(page, selector, value) {
   await page.locator(selector).dispatchEvent('blur');
 }
 
-async function applyFilters(page, { dateFrom, dateTo, timeFrom, timeTo }) {
+async function applyFilters(page, reportDef, { dateFrom, dateTo, timeFrom, timeTo }) {
   const toSlash = (d) => d.replace(/-/g, '/'); // payload usa dd-MM-yyyy, o input usa dd/MM/yyyy
 
-  await fillAndCommit(page, '#dat_inicial', toSlash(dateFrom));
-  await fillAndCommit(page, '#hor_inicial', timeFrom);
-  await fillAndCommit(page, '#dat_final', toSlash(dateTo));
-  await fillAndCommit(page, '#hor_final', timeTo);
+  await fillAndCommit(page, reportDef.dateFieldSelectors.dateFrom, toSlash(dateFrom));
+  await fillAndCommit(page, reportDef.dateFieldSelectors.dateTo, toSlash(dateTo));
+  if (reportDef.hasTimeFilters) {
+    await fillAndCommit(page, reportDef.timeFieldSelectors.timeFrom, timeFrom);
+    await fillAndCommit(page, reportDef.timeFieldSelectors.timeTo, timeTo);
+  }
 
   // Confere que o formulario realmente ficou com os valores pedidos antes
   // de submeter - falha alto e claro em vez de exportar o filtro errado
   // silenciosamente.
-  const actualDatInicial = await page.locator('#dat_inicial').inputValue();
-  const actualDatFinal = await page.locator('#dat_final').inputValue();
-  if (actualDatInicial !== toSlash(dateFrom) || actualDatFinal !== toSlash(dateTo)) {
+  const actualDateFrom = await page.locator(reportDef.dateFieldSelectors.dateFrom).inputValue();
+  const actualDateTo = await page.locator(reportDef.dateFieldSelectors.dateTo).inputValue();
+  if (actualDateFrom !== toSlash(dateFrom) || actualDateTo !== toSlash(dateTo)) {
     throw new Error(
-      `Formulario de filtro nao refletiu as datas pedidas (esperado ${toSlash(dateFrom)} a ${toSlash(dateTo)}, ` +
-        `encontrado ${actualDatInicial} a ${actualDatFinal}). Abortando para nao exportar periodo errado.`,
+      `[${reportDef.key}] Formulario de filtro nao refletiu as datas pedidas (esperado ${toSlash(dateFrom)} a ${toSlash(dateTo)}, ` +
+        `encontrado ${actualDateFrom} a ${actualDateTo}). Abortando para nao exportar periodo errado.`,
     );
   }
 
@@ -49,8 +52,8 @@ async function applyFilters(page, { dateFrom, dateTo, timeFrom, timeTo }) {
  * Filtra e baixa um unico pedaco (mes) do relatorio, retornando os bytes
  * crus do CSV (com header e BOM inclusos).
  */
-async function fetchChunk(context, page, chunk) {
-  await applyFilters(page, chunk);
+async function fetchChunk(context, page, reportDef, chunk) {
+  await applyFilters(page, reportDef, chunk);
 
   const formToken = await page
     .locator('#filtro_relatorio input[name="form_token"]')
@@ -58,23 +61,27 @@ async function fetchChunk(context, page, chunk) {
 
   const payload = {
     form_token: formToken,
-    dat_inicial: chunk.dateFrom,
-    hor_inicial: chunk.timeFrom,
-    dat_final: chunk.dateTo,
-    hor_final: chunk.timeTo,
-    ...config.defaultFilters,
+    [reportDef.payloadDateKeys.dateFrom]: chunk.dateFrom,
+    [reportDef.payloadDateKeys.dateTo]: chunk.dateTo,
+    ...(reportDef.hasTimeFilters
+      ? {
+          [reportDef.payloadTimeKeys.timeFrom]: chunk.timeFrom,
+          [reportDef.payloadTimeKeys.timeTo]: chunk.timeTo,
+        }
+      : {}),
+    ...reportDef.defaultFilters,
     'export-to-csv': 'true',
   };
 
   const base64Payload = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64');
-  const url = `${config.baseUrl}${config.reportPath}/data64/${base64Payload}`;
+  const url = `${config.baseUrl}${reportDef.reportPath}/data64/${base64Payload}`;
 
   // Intervalos grandes fazem o servidor gerar o CSV de forma sincrona, o
   // que pode passar bastante do timeout padrao (30s) do Playwright.
   const response = await context.request.get(url, { timeout: 5 * 60 * 1000 });
   if (!response.ok()) {
     throw new Error(
-      `Falha ao exportar periodo ${chunk.dateFrom} a ${chunk.dateTo}: HTTP ${response.status()}`,
+      `[${reportDef.key}] Falha ao exportar periodo ${chunk.dateFrom} a ${chunk.dateTo}: HTTP ${response.status()}`,
     );
   }
 
@@ -90,45 +97,52 @@ function stripHeader(buffer) {
 }
 
 /**
- * Exporta o relatorio para o intervalo pedido. Internamente quebra o
- * periodo em pedacos mensais (ver dateRange.js) para nao estourar o limite
- * do servidor, e concatena tudo em um unico arquivo com um so cabecalho.
- */
-/**
  * Emite uma linha de progresso em JSON no stdout, num formato fixo
  * ("PROGRESS {...}") para que um processo pai (o BFF Java, via
  * ProcessBuilder) consiga fazer parse do andamento sem depender de texto
  * livre. Ver bff/.../NodeProcessReportJobRunner.java, que le stdout linha a
  * linha e casa esse prefixo.
+ *
+ * O campo "report" identifica qual dos relatorios concorrentes gerou essa
+ * atualizacao (ver REPORT_DEFINITIONS) - necessario desde que passamos a
+ * rodar mais de um relatorio ao mesmo tempo (index.js).
  */
-function reportProgress(percent, message) {
-  console.log(`PROGRESS ${JSON.stringify({ percent, message })}`);
+function reportProgress(reportKey, percent, message) {
+  console.log(`PROGRESS ${JSON.stringify({ report: reportKey, percent, message })}`);
 }
 
-export async function exportCsv(context, page, filters) {
+/**
+ * Exporta um relatorio (`reportDef`) para o intervalo pedido, usando a
+ * pagina (`page`) e o contexto de browser (`context`, para as chamadas
+ * `context.request`) que o chamador ja deixou autenticados e navegados na
+ * pagina correta do relatorio.
+ *
+ * Internamente quebra o periodo em pedacos mensais em ordem decrescente
+ * (ver dateRange.js) e concatena tudo em um unico arquivo com um so
+ * cabecalho - mesma regra de organizacao de datas para qualquer relatorio.
+ */
+export async function exportCsv(context, page, reportDef, filters) {
   const chunks = splitIntoMonthlyChunks(filters);
   const buffers = [];
 
   for (const [index, chunk] of chunks.entries()) {
-    const message = `Exportando periodo ${index + 1}/${chunks.length}: ${chunk.dateFrom} ${chunk.timeFrom} ate ${chunk.dateTo} ${chunk.timeTo}`;
+    const message = `[${reportDef.label}] Exportando periodo ${index + 1}/${chunks.length}: ${chunk.dateFrom} ${chunk.timeFrom} ate ${chunk.dateTo} ${chunk.timeTo}`;
     console.log(`>>> ${message}`);
-    reportProgress(Math.round((index / chunks.length) * 100), message);
+    reportProgress(reportDef.key, Math.round((index / chunks.length) * 100), message);
 
-    const buffer = await fetchChunk(context, page, chunk);
+    const buffer = await fetchChunk(context, page, reportDef, chunk);
     buffers.push(index === 0 ? buffer : stripHeader(buffer));
 
-    reportProgress(Math.round(((index + 1) / chunks.length) * 100), message);
+    reportProgress(reportDef.key, Math.round(((index + 1) / chunks.length) * 100), message);
   }
 
   await fs.mkdir(config.downloadsDir, { recursive: true });
-  const fileName = `relatorio-atendimento_${filters.dateFrom}_a_${filters.dateTo}.csv`.replace(
+  const fileName = `${reportDef.fileLabel}_${filters.dateFrom}_a_${filters.dateTo}.csv`.replace(
     /\//g,
     '-',
   );
   const filePath = path.join(config.downloadsDir, fileName);
   await fs.writeFile(filePath, Buffer.concat(buffers));
-
-  console.log(`RESULT ${JSON.stringify({ filePath })}`);
 
   return filePath;
 }
