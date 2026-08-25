@@ -29,6 +29,14 @@ function addDays(date, days) {
  *
  * A hora de inicio/fim original (timeFrom/timeTo) so se aplica ao primeiro
  * e ultimo pedaco - os pedacos do meio cobrem o dia inteiro.
+ *
+ * Cada pedaco, individualmente, ja vem do Matrix ordenado decrescente
+ * (config.defaultFilters usa sidx=dat_entrada/sord=desc). Para o CSV
+ * consolidado final ficar realmente decrescente do inicio ao fim (e nao
+ * "decrescente dentro de cada mes, mas mes 1 -> mes 2 -> mes 3" no
+ * agregado), os pedacos sao retornados do mes mais recente para o mais
+ * antigo - ex.: para 02-02-2026 a 04-04-2026, a ordem e
+ * [01-04 a 04-04, 01-03 a 31-03, 02-02 a 28-02].
  */
 export function splitIntoMonthlyChunks({ dateFrom, dateTo, timeFrom, timeTo }) {
   const start = parseDate(dateFrom);
@@ -57,5 +65,5 @@ export function splitIntoMonthlyChunks({ dateFrom, dateTo, timeFrom, timeTo }) {
     cursor = addDays(chunkEnd, 1);
   }
 
-  return chunks;
+  return chunks.reverse();
 }
