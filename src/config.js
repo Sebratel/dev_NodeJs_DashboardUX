@@ -10,9 +10,18 @@ export const config = {
   // pagina de relatorio autenticada serve para esse fim, entao ficamos com
   // o relatorio de atendimento por ser o primeiro que existiu aqui.
   reportPath: '/relatorio-atendimento/relatorio-atendimento-analitico',
-  // Diretorio de perfil persistente do Chromium (cookies, cache, IndexedDB...)
+  // Diretorio de perfil persistente do Chromium (cache, IndexedDB, etc)
   // reaproveitado em toda execucao para nao precisar logar de novo.
   profileDir: path.join(ROOT, '.auth', 'chromium-profile'),
+  // O cookie de sessao do Matrix (SACMessenger) nao tem data de expiracao -
+  // e um cookie de sessao "de verdade", e o Chromium descarta esse tipo de
+  // cookie ao fechar o processo mesmo usando profileDir persistente (esse
+  // e o comportamento padrao de qualquer browser, nao um bug do profile).
+  // Por isso salvamos um snapshot explicito (storageState do Playwright,
+  // que preserva cookies de sessao) assim que o login e confirmado, e
+  // recarregamos esse snapshot manualmente em toda nova instancia do
+  // Chromium - ver saveSessionState()/loadSavedCookies() em session.js.
+  storageStatePath: path.join(ROOT, '.auth', 'storage-state.json'),
   downloadsDir: path.join(ROOT, 'downloads'),
 
   // Intervalo entre tentativas de detectar login concluido (ms)

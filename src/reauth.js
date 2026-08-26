@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { openForManualLogin, isLoggedIn } from './session.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { openForManualLogin, isLoggedIn, saveSessionState } from './session.js';
 import { config } from './config.js';
 
 /**
@@ -19,6 +21,7 @@ const state = {
   active: false,
   loggedIn: false,
   context: null,
+  pollPage: null,
   procs: [],
   pollTimer: null,
 };
@@ -52,6 +55,15 @@ function killStrayProcesses() {
   // Chromium headed do playwright: identificado pelo profileDir na linha
   // de comando (--user-data-dir=...), nao ha flag "--headless=false" real.
   spawnSync('pkill', ['-9', '-f', config.profileDir]);
+
+  // pkill -9 mata o processo mas nao da chance dele apagar os proprios
+  // arquivos de lock (SingletonLock/SingletonSocket/SingletonCookie) do
+  // profileDir - sobrevivem ao kill e travam qualquer launch seguinte com
+  // "profile appears to be in use by another Chromium process", mesmo com
+  // o processo antigo ja morto. Precisa apagar manualmente.
+  for (const lockFile of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    fs.rmSync(path.join(config.profileDir, lockFile), { force: true });
+  }
 }
 
 export function reauthStatus() {
@@ -59,6 +71,7 @@ export function reauthStatus() {
 }
 
 export async function startReauth() {
+  console.log('[reauth] startReauth chamado. active atual=', state.active);
   if (state.active) return reauthStatus();
 
   // Precisa ser síncrono, ANTES de qualquer await - senão duas chamadas
@@ -72,6 +85,7 @@ export async function startReauth() {
   state.loggedIn = false;
 
   killStrayProcesses();
+  console.log('[reauth] processos orfaos mortos, subindo Xvfb/x11vnc/websockify...');
   await new Promise((resolve) => setTimeout(resolve, 500));
 
   try {
@@ -93,19 +107,46 @@ export async function startReauth() {
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     spawnProc('websockify', ['--web=/usr/share/novnc', String(NOVNC_PORT), `localhost:${VNC_PORT}`]);
+    console.log('[reauth] Xvfb/x11vnc/websockify no ar, abrindo Chromium headed...');
 
     process.env.DISPLAY = DISPLAY;
-    const { context, page } = await openForManualLogin();
+    const { context } = await openForManualLogin();
     state.context = context;
 
+    // Aba dedicada ao poll, criada UMA vez so (nao a cada tick) - abrir/
+    // fechar aba repetidamente no mesmo browser headed pisca a janela toda
+    // (sintoma observado: "pagina fica atualizando constantemente"). Uma
+    // aba unica reaproveitada nao causa esse efeito, e como e uma pagina
+    // de verdade (nao um fetch cru) roda o JS da SPA - necessario porque
+    // o Matrix so injeta #form-login/#filtro_relatorio no DOM depois de
+    // montar a rota certa, entao um fetch sem JS nunca veria esses ids.
+    state.pollPage = await context.newPage();
+    console.log('[reauth] Chromium headed pronto, iniciando poll a cada %dms', config.loginPollIntervalMs);
+
+    let tick = 0;
     state.pollTimer = setInterval(async () => {
-      const logged = await isLoggedIn(page).catch(() => false);
-      if (logged) {
-        state.loggedIn = true;
-        await stopReauth();
+      tick += 1;
+      console.log('[reauth] poll tick #%d', tick);
+      try {
+        const logged = await isLoggedIn(state.pollPage);
+        console.log('[reauth] poll tick #%d resultado: loggedIn=%s', tick, logged);
+        if (logged) {
+          state.loggedIn = true;
+          console.log('[reauth] login detectado, salvando storageState antes de fechar');
+          // Precisa salvar ANTES do context.close() dentro de stopReauth() -
+          // o cookie de sessao do Matrix (sem expiracao) some assim que o
+          // Chromium fecha, entao capturar depois seria tarde demais.
+          await saveSessionState(context).catch((err) => {
+            console.log('[reauth] falha ao salvar storageState:', err?.message ?? err);
+          });
+          await stopReauth();
+        }
+      } catch (err) {
+        console.log('[reauth] poll tick #%d erro transitorio:', tick, err?.message ?? err);
       }
     }, config.loginPollIntervalMs);
   } catch (err) {
+    console.log('[reauth] erro ao iniciar reauth:', err?.message ?? err);
     await stopReauth();
     throw err;
   }
@@ -114,9 +155,14 @@ export async function startReauth() {
 }
 
 export async function stopReauth() {
+  console.log('[reauth] stopReauth chamado');
   if (state.pollTimer) {
     clearInterval(state.pollTimer);
     state.pollTimer = null;
+  }
+  if (state.pollPage) {
+    await state.pollPage.close().catch(() => {});
+    state.pollPage = null;
   }
   if (state.context) {
     await state.context.close().catch(() => {});
