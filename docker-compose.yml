@@ -22,6 +22,11 @@ services:
       DATA_HUB_TOKEN: ${DATA_HUB_TOKEN}
       MATRIX_API_LOGIN: ${MATRIX_API_LOGIN}
       MATRIX_API_SENHA: ${MATRIX_API_SENHA}
+      MASSIVES_DB_HOST: ${MASSIVES_DB_HOST}
+      MASSIVES_DB_PORT: ${MASSIVES_DB_PORT}
+      MASSIVES_DB_USER: ${MASSIVES_DB_USER}
+      MASSIVES_DB_PASSWORD: ${MASSIVES_DB_PASSWORD}
+      MASSIVES_DB_NAME: ${MASSIVES_DB_NAME}
     volumes:
       - automation-auth:/app/.auth
       - automation-downloads:/app/downloads

@@ -1,5 +1,6 @@
 import { config } from './config.js';
 import { getValidToken } from './matrixAuth.js';
+import { getWatermark, getCachedRows, replaceDayRows, TABLES } from './reportsDb.js';
 
 const CONCURRENCY = config.matrixApi.concurrency ?? 25;
 
@@ -108,14 +109,19 @@ function toIsoDate(date) {
 }
 
 /**
- * Busca um relatorio paginado da API REST da Matrix, quebrando o intervalo
- * pedido em pedacos DIARIOS antes de paginar.
+ * Busca um relatorio paginado da API REST da Matrix para os dias pedidos.
  *
- * Isso importa porque o servidor parece escanear o intervalo inteiro a cada
- * pagina, nao so a pagina pedida - testado manualmente, uma unica chamada
- * (pagina 1) para um intervalo de ~8 meses levou mais de 2 minutos, contra
- * menos de 1s para 1 dia. Quebrar por dia mantem cada chamada individual
- * rapida mesmo cobrindo um periodo longo no total.
+ * `dayEntries` e uma lista de { day, index } - `index` e a posicao do dia
+ * DENTRO DO RANGE COMPLETO pedido pelo usuario, nao dentro de `dayEntries`
+ * em si. Isso importa porque relAtAnalitico usa esse indice pra saber se e
+ * o primeiro/ultimo dia do range inteiro (pra aplicar o horario especifico -
+ * ver fetchAtendimentoApi) mesmo quando `dayEntries` e so um SUBCONJUNTO do
+ * range (os dias que faltam buscar - ver fetchWithCache).
+ *
+ * Isso importa quebrar por dia porque o servidor parece escanear o
+ * intervalo inteiro a cada pagina, nao so a pagina pedida - testado
+ * manualmente, uma unica chamada (pagina 1) para um intervalo de ~8 meses
+ * levou mais de 2 minutos, contra menos de 1s para 1 dia.
  *
  * Concorrencia fica numa pool fixa (ver CONCURRENCY/config.js) - primeiro
  * busca a pagina 1 de cada dia (para descobrir quantas paginas cada um tem),
@@ -129,12 +135,17 @@ function toIsoDate(date) {
  * checkpoint e outro. A fase 1 (descobrir quantas paginas cada dia tem)
  * ocupa 0-50%, proporcional aos dias ja consultados; a fase 2 (buscar as
  * paginas extras) ocupa 50-90%, proporcional as paginas extras ja buscadas.
+ *
+ * Devolve um Map<isoDate, rows[]> (nao uma lista achatada) - quem chama
+ * (fetchWithCache) precisa saber quais linhas pertencem a qual dia pra
+ * salvar no cache um dia de cada vez.
  */
 async function paginateByDay(
-  { dateFrom, dateTo, buildFirstPageUrl, buildPageUrl, getRows, getPageCount },
+  { dayEntries, buildFirstPageUrl, buildPageUrl, getRows, getPageCount },
   onProgress,
 ) {
-  const days = eachDay(dateFrom, dateTo);
+  const rowsByDay = new Map();
+  if (!dayEntries.length) return rowsByDay;
 
   // Com milhares de paginas, varias delas caem no mesmo ponto percentual
   // arredondado - sem essa deduplicacao cada pagina dispararia um evento de
@@ -147,41 +158,95 @@ async function paginateByDay(
     onProgress?.(percent);
   };
 
+  const addRows = (day, rows) => {
+    const key = toIsoDate(day);
+    if (!rowsByDay.has(key)) rowsByDay.set(key, []);
+    rowsByDay.get(key).push(...rows);
+  };
+
   let firstPagesDone = 0;
   const firstPageResults = await runWithConcurrency(
-    days.map((day, index) => async () => {
+    dayEntries.map(({ day, index }) => async () => {
       const body = await withRetry(() => fetchJson(buildFirstPageUrl(day, index)));
       return { day, index, body };
     }),
     CONCURRENCY,
-    () => emitProgress(Math.round((++firstPagesDone / days.length) * 50)),
+    () => emitProgress(Math.round((++firstPagesDone / dayEntries.length) * 50)),
   );
 
-  const allRows = [];
   const extraPageTasks = [];
   for (const { day, index, body } of firstPageResults) {
-    allRows.push(...getRows(body));
+    addRows(day, getRows(body));
     const pageCount = getPageCount(body);
     for (let page = 2; page <= pageCount; page++) {
-      extraPageTasks.push(() =>
-        withRetry(() => fetchJson(buildPageUrl(day, index, page))).then(getRows),
-      );
+      extraPageTasks.push({
+        day,
+        run: () => withRetry(() => fetchJson(buildPageUrl(day, index, page))).then(getRows),
+      });
     }
   }
 
   if (extraPageTasks.length) {
     let extraPagesDone = 0;
     const extraPageResults = await runWithConcurrency(
-      extraPageTasks,
+      extraPageTasks.map(({ run }) => run),
       CONCURRENCY,
       () => emitProgress(50 + Math.round((++extraPagesDone / extraPageTasks.length) * 40)),
     );
-    for (const rows of extraPageResults) allRows.push(...rows);
+    extraPageResults.forEach((rows, i) => addRows(extraPageTasks[i].day, rows));
   } else {
     emitProgress(90);
   }
 
-  return allRows;
+  return rowsByDay;
+}
+
+/**
+ * Camada de cache incremental por cima de paginateByDay (ver reportsDb.js).
+ * Dias antes da marca d'agua (o dia mais recente ja salvo) vem direto do
+ * banco - rapido, zero chamadas a API. A marca d'agua em si (pode ter sido
+ * salva incompleta, ex.: dia ainda em andamento na hora que foi salva) e
+ * todo dia depois dela (nunca visto) vem da API e sao salvos, avancando a
+ * marca d'agua pro proximo request.
+ *
+ * So faz sentido cachear dias INTEIROS (00:00-23:59) - se o request pedir
+ * uma janela de horario parcial (timeFrom/timeTo diferente do dia inteiro),
+ * cachear esse resultado incompleto quebraria requests futuros pelo dia
+ * inteiro. Nesse caso `runFetch` e chamado sem nenhuma divisao de cache
+ * (todo o range vira dayEntries, nada e lido/salvo no banco).
+ */
+async function fetchWithCache(table, filters, runFetch) {
+  const isFullDayRequest =
+    (filters.timeFrom ?? '00:00') === '00:00' && (filters.timeTo ?? '23:59') === '23:59';
+
+  const allDays = eachDay(filters.dateFrom, filters.dateTo);
+  const watermark = isFullDayRequest ? await getWatermark(table) : null;
+
+  const cachedDays = [];
+  const apiDayEntries = [];
+  allDays.forEach((day, index) => {
+    if (watermark && day < watermark) {
+      cachedDays.push(day);
+    } else {
+      apiDayEntries.push({ day, index });
+    }
+  });
+
+  const cachedRows = cachedDays.length
+    ? await getCachedRows(table, cachedDays[0], cachedDays[cachedDays.length - 1])
+    : [];
+
+  const rowsByDay = await runFetch(apiDayEntries);
+
+  if (isFullDayRequest) {
+    await Promise.all(
+      [...rowsByDay.entries()].map(([isoDay, rows]) =>
+        replaceDayRows(table, new Date(`${isoDay}T00:00:00`), rows),
+      ),
+    );
+  }
+
+  return [...cachedRows, ...[...rowsByDay.values()].flat()];
 }
 
 /** GET /rest/v2/hsmEnviadas - paginacao fixa em 100 registros/pagina (sem parametro de tamanho). */
@@ -194,16 +259,17 @@ export async function fetchHsmEnviadasApi(filters, onProgress) {
     return url;
   };
 
-  return paginateByDay(
-    {
-      dateFrom: filters.dateFrom,
-      dateTo: filters.dateTo,
-      buildFirstPageUrl: (day) => buildUrl(day, 1),
-      buildPageUrl: (day, _index, page) => buildUrl(day, page),
-      getRows: (body) => body.registros ?? [],
-      getPageCount: (body) => Number(body.num_pages ?? 1),
-    },
-    onProgress,
+  return fetchWithCache(TABLES.hsmEnviadas, filters, (dayEntries) =>
+    paginateByDay(
+      {
+        dayEntries,
+        buildFirstPageUrl: (day) => buildUrl(day, 1),
+        buildPageUrl: (day, _index, page) => buildUrl(day, page),
+        getRows: (body) => body.registros ?? [],
+        getPageCount: (body) => Number(body.num_pages ?? 1),
+      },
+      onProgress,
+    ),
   );
 }
 
@@ -231,15 +297,16 @@ export async function fetchAtendimentoApi(filters, onProgress) {
     return url;
   };
 
-  return paginateByDay(
-    {
-      dateFrom: filters.dateFrom,
-      dateTo: filters.dateTo,
-      buildFirstPageUrl: (day, index) => buildUrl(day, index, 1),
-      buildPageUrl: (day, index, page) => buildUrl(day, index, page),
-      getRows: (body) => body.rows ?? [],
-      getPageCount: (body) => Number(body.total ?? 1),
-    },
-    onProgress,
+  return fetchWithCache(TABLES.atendimentoAnalitico, filters, (dayEntries) =>
+    paginateByDay(
+      {
+        dayEntries,
+        buildFirstPageUrl: (day, index) => buildUrl(day, index, 1),
+        buildPageUrl: (day, index, page) => buildUrl(day, index, page),
+        getRows: (body) => body.rows ?? [],
+        getPageCount: (body) => Number(body.total ?? 1),
+      },
+      onProgress,
+    ),
   );
 }

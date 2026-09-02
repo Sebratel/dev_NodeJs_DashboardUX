@@ -67,4 +67,19 @@ export const config = {
     senha: process.env.MATRIX_API_SENHA,
     concurrency: 20,
   },
+
+  // Cache incremental dos relatorios da Matrix num MariaDB compartilhado
+  // (schema API_WebDeveloper, mesmo servidor de outros projetos internos -
+  // ver reportsDb.js). Motivacao: dados de dias passados nunca mudam, entao
+  // nao faz sentido rebuscar tudo pela API a cada geracao de relatorio - so
+  // o dia mais recente ja salvo (a "marca d'agua") precisa ser rebuscado,
+  // porque pode ter sido salvo incompleto (dia ainda em andamento). Credenciais
+  // - nao commitar em texto puro; definir via ambiente (ver .env.example).
+  massivesDb: {
+    host: process.env.MASSIVES_DB_HOST,
+    port: Number(process.env.MASSIVES_DB_PORT ?? 3306),
+    user: process.env.MASSIVES_DB_USER,
+    password: process.env.MASSIVES_DB_PASSWORD,
+    database: process.env.MASSIVES_DB_NAME,
+  },
 };
