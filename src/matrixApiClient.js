@@ -239,11 +239,14 @@ async function fetchWithCache(table, filters, runFetch) {
   const rowsByDay = await runFetch(apiDayEntries);
 
   if (isFullDayRequest) {
-    await Promise.all(
-      [...rowsByDay.entries()].map(([isoDay, rows]) =>
-        replaceDayRows(table, new Date(`${isoDay}T00:00:00`), rows),
-      ),
-    );
+    // Sequencial, NAO Promise.all - varias transacoes de DELETE+INSERT
+    // concorrentes na mesma tabela (dias diferentes) causam deadlock no
+    // MariaDB (testado manualmente: com 3 dias, 2 das 3 gravacoes
+    // colidiram e falharam). Sao operacoes locais rapidas comparadas ao
+    // fetch na API, entao rodar uma de cada vez nao pesa no tempo total.
+    for (const [isoDay, rows] of rowsByDay) {
+      await replaceDayRows(table, new Date(`${isoDay}T00:00:00`), rows);
+    }
   }
 
   return [...cachedRows, ...[...rowsByDay.values()].flat()];
