@@ -67,24 +67,37 @@ async function ensureTable(db, table) {
 }
 
 /**
- * Devolve a data mais recente ja salva na tabela (a "marca d'agua"), ou null
- * se a tabela ainda esta vazia/nao existe/o banco esta inacessivel - nesses
- * casos quem chama trata como "sem cache", buscando tudo da API normalmente
- * (a integracao com o banco e so uma otimizacao, nunca pode quebrar o fluxo
+ * Devolve o intervalo [min, max] de report_date ja salvo na tabela (min/max
+ * null se a tabela esta vazia/nao existe/o banco esta inacessivel - nesses
+ * casos quem chama trata como "sem cache", buscando tudo da API normalmente;
+ * a integracao com o banco e so uma otimizacao, nunca pode quebrar o fluxo
  * existente).
+ *
+ * `max` e a "marca d'agua" (sempre rebuscada, pode ter sido salva incompleta
+ * - ex.: o dia ainda nao tinha terminado quando foi salvo). `min` existe pra
+ * detectar quando o cache NAO cobre o inicio do range pedido: um dia so pode
+ * ser considerado coberto se estiver DENTRO de [min, max) - um dia anterior
+ * ao `min` nunca foi buscado, mesmo sendo "menor que a marca d'agua", e
+ * precisa vir da API (senao um request cujo dateFrom seja anterior ao
+ * primeiro dia ja cacheado voltaria com esses dias vazios, silenciosamente).
  */
-export async function getWatermark(table) {
+export async function getCacheBounds(table) {
   const db = getPool();
-  if (!db) return null;
+  if (!db) return { min: null, max: null };
 
   try {
     await ensureTable(db, table);
-    const [rows] = await db.query(`SELECT MAX(report_date) AS maxDate FROM ${table}`);
-    const maxDate = rows[0]?.maxDate;
-    return maxDate ? new Date(maxDate) : null;
+    const [rows] = await db.query(
+      `SELECT MIN(report_date) AS minDate, MAX(report_date) AS maxDate FROM ${table}`,
+    );
+    const { minDate, maxDate } = rows[0] ?? {};
+    return {
+      min: minDate ? new Date(minDate) : null,
+      max: maxDate ? new Date(maxDate) : null,
+    };
   } catch (error) {
     console.warn(`[reportsDb] Falha ao ler marca d'agua de ${table}: ${error.message}`);
-    return null;
+    return { min: null, max: null };
   }
 }
 

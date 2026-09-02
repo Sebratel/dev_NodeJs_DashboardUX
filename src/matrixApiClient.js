@@ -1,6 +1,6 @@
 import { config } from './config.js';
 import { getValidToken } from './matrixAuth.js';
-import { getWatermark, getCachedRows, replaceDayRows, TABLES } from './reportsDb.js';
+import { getCacheBounds, getCachedRows, replaceDayRows, TABLES } from './reportsDb.js';
 
 const CONCURRENCY = config.matrixApi.concurrency ?? 25;
 
@@ -203,11 +203,19 @@ async function paginateByDay(
 
 /**
  * Camada de cache incremental por cima de paginateByDay (ver reportsDb.js).
- * Dias antes da marca d'agua (o dia mais recente ja salvo) vem direto do
- * banco - rapido, zero chamadas a API. A marca d'agua em si (pode ter sido
- * salva incompleta, ex.: dia ainda em andamento na hora que foi salva) e
- * todo dia depois dela (nunca visto) vem da API e sao salvos, avancando a
- * marca d'agua pro proximo request.
+ * Dias dentro de [min, marca d'agua) - ou seja, ja cobertos pelo cache - vem
+ * direto do banco, rapido, zero chamadas a API. A marca d'agua em si (pode
+ * ter sido salva incompleta, ex.: dia ainda em andamento na hora que foi
+ * salva) e todo dia fora desse intervalo conhecido (nunca visto, seja antes
+ * do `min` ou depois da marca d'agua) vem da API e sao salvos, expandindo o
+ * intervalo coberto pro proximo request.
+ *
+ * O `min` importa pra nao confundir "dia anterior a marca d'agua" com "dia
+ * ja cacheado": se alguem pedir um range cujo inicio e ANTERIOR ao primeiro
+ * dia que ja existe no banco (ex.: cache comecou em 2026, pediram desde
+ * 2025), esses dias de 2025 sao menores que a marca d'agua mas NUNCA foram
+ * buscados - sem essa checagem eles voltariam vazios do banco, sem nunca
+ * bater na API.
  *
  * So faz sentido cachear dias INTEIROS (00:00-23:59) - se o request pedir
  * uma janela de horario parcial (timeFrom/timeTo diferente do dia inteiro),
@@ -220,12 +228,14 @@ async function fetchWithCache(table, filters, runFetch) {
     (filters.timeFrom ?? '00:00') === '00:00' && (filters.timeTo ?? '23:59') === '23:59';
 
   const allDays = eachDay(filters.dateFrom, filters.dateTo);
-  const watermark = isFullDayRequest ? await getWatermark(table) : null;
+  const { min, max } = isFullDayRequest
+    ? await getCacheBounds(table)
+    : { min: null, max: null };
 
   const cachedDays = [];
   const apiDayEntries = [];
   allDays.forEach((day, index) => {
-    if (watermark && day < watermark) {
+    if (min && max && day >= min && day < max) {
       cachedDays.push(day);
     } else {
       apiDayEntries.push({ day, index });
