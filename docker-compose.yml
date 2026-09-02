@@ -20,6 +20,8 @@ services:
     environment:
       PORT: "3212"
       DATA_HUB_TOKEN: ${DATA_HUB_TOKEN}
+      MATRIX_API_LOGIN: ${MATRIX_API_LOGIN}
+      MATRIX_API_SENHA: ${MATRIX_API_SENHA}
     volumes:
       - automation-auth:/app/.auth
       - automation-downloads:/app/downloads

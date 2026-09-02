@@ -31,7 +31,7 @@ app.get('/jobs', (req, res) => {
 });
 
 app.post('/jobs', (req, res) => {
-  const { dateFrom, dateTo, timeFrom, timeTo } = req.body ?? {};
+  const { dateFrom, dateTo, timeFrom, timeTo, mode } = req.body ?? {};
   if (!dateFrom || !dateTo) {
     res.status(400).json({ error: 'dateFrom e dateTo (dd-MM-yyyy) sao obrigatorios.' });
     return;
@@ -42,6 +42,8 @@ app.post('/jobs', (req, res) => {
     dateTo,
     timeFrom: timeFrom ?? '00:00',
     timeTo: timeTo ?? '23:59',
+    // "api" (padrao) ou "novnc" - ver runReportJob.js.
+    mode: mode === 'novnc' ? 'novnc' : 'api',
   });
 
   res.status(202).json({ jobId: job.id });

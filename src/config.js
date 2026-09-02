@@ -40,4 +40,31 @@ export const config = {
     // intervalo entre chamadas para nunca estourar o limite.
     minRequestIntervalMs: 6500,
   },
+
+  // Modo "api": busca atendimento/HSM direto pela API REST da Matrix
+  // (rest/v2/relAtAnalitico e rest/v2/hsmEnviadas) em vez de scraping via
+  // Playwright - ver matrixApiClient.js/matrixAuth.js. Login/senha de um
+  // usuario da Matrix (nao um token fixo) - o servico se autentica sozinho
+  // via POST /rest/v2/authuser e renova o bearer token (~1h de validade)
+  // conforme necessario, ver matrixAuth.js. Segredo, nao commitar em texto
+  // puro.
+  //
+  // `concurrency` foi calibrado testando manualmente contra o servidor real:
+  // ate 50 chamadas simultaneas = 0 falhas; 100 simultaneas = ~20-30% de
+  // HTTP 500. Nao e rate limit por tempo (sem 429/Retry-After) - e
+  // esgotamento momentaneo de capacidade do servidor, que se recupera na
+  // hora assim que a concorrencia cai (sem "castigo"/cooldown).
+  //
+  // Esse teste foi uma rajada isolada, unica - num range de varios meses os
+  // dois relatorios (HSM + atendimento) rodam suas pools ao mesmo tempo por
+  // varias ondas seguidas (uma por dia do range), sustentando concorrencia
+  // real de ate 2x esse valor por mais tempo. Testado manualmente com 25
+  // (pico de 50): escapou uma falha HTTP 500 e uma HTTP 412 num range de ~8
+  // meses mesmo com retry. 20 (pico de 40) da mais margem sem perder muita
+  // velocidade - dia unico continua saindo em segundos.
+  matrixApi: {
+    login: process.env.MATRIX_API_LOGIN,
+    senha: process.env.MATRIX_API_SENHA,
+    concurrency: 20,
+  },
 };
