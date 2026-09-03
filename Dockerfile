@@ -23,4 +23,12 @@ COPY src ./src
 ENV PORT=3212
 EXPOSE 3212 6080
 
-CMD ["node", "src/server.js"]
+# --max-old-space-size=8192: sem isso, um pedido de relatorio cobrindo um
+# range grande (varios meses/anos) estoura o limite padrao do V8 (~4GB) ao
+# carregar TODO o cache incremental do periodo de uma vez em memoria (ver
+# fetchWithCache/getCachedRows em matrixApiClient.js/reportsDb.js) -
+# confirmado derrubando o processo com "JavaScript heap out of memory" ao
+# carregar 20 meses (~1,6M linhas) do cache do relatorio de Atendimento. Nao
+# resolve a causa raiz (o array inteiro ainda vai pra memoria de uma vez),
+# so empurra o teto pra mais longe - suficiente pros ranges grandes de hoje.
+CMD ["node", "--max-old-space-size=8192", "src/server.js"]

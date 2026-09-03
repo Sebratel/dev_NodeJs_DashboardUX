@@ -31,14 +31,29 @@ export const TABLES = {
  * - 'raw'      texto (VARCHAR/TEXT) - sem cast, vai/volta como string.
  * - 'int'      numerico (BIGINT/INT/TINYINT) - a API devolve string
  *              ("3717366"), aqui vira number de verdade.
- * - 'time'     TIME ("HH:MM:SS") - mysql2 ja devolve como string por
- *              padrao, sem cast necessario.
+ * - 'duration' "H...H:MM:SS" (ex.: tempo de atendimento) guardado como
+ *              BIGINT de segundos totais, NAO como TIME - o tipo TIME do
+ *              MySQL/MariaDB tem range de so ate 838:59:59, e atendimentos
+ *              reais passam disso (ex.: "7529:15:50", atendimento que ficou
+ *              aberto por semanas) - descoberto na primeira carga real, dias
+ *              inteiros silenciosamente falhavam ao salvar por causa disso.
+ *              Reconstruido de volta pro formato "HH:MM:SS" original na
+ *              leitura (ver getCachedRows/secondsToHms) - fica utilizavel
+ *              tanto para agregacao SQL (AVG/SUM em segundos) quanto para
+ *              quem consome a string original.
  * - 'datetime' DATETIME - lido com DATE_FORMAT (ver getCachedRows) para
  *              devolver o mesmo formato de string "yyyy-MM-dd HH:mm:ss" que
  *              a API original, sem depender de config global do driver.
  * - 'json'     campo multivalorado (ex.: lista de classificacoes) - unico
  *              caso onde ainda faz sentido guardar como JSON, por ser
  *              genuinamente uma lista, nao a linha inteira.
+ *
+ * Colunas de texto livre (nome de contato/agente/conta/servico, tag, email,
+ * caminho de fila, matricula) usam TEXT em vez de VARCHAR com tamanho fixo -
+ * na primeira carga real, `tag` (VARCHAR(255)) e `matricula` (VARCHAR(64))
+ * estouraram o limite em varios dias (tag pode concatenar varias tags com
+ * "||"), derrubando o dia inteiro do cache. Sem controle sobre o tamanho
+ * real desses campos na origem, TEXT evita repetir o problema.
  *
  * Campos do CSV "Relatorio de Atendimento" exportado pela Matrix que NAO
  * tem equivalente nesta API REST (confirmado inspecionando 300 linhas
@@ -57,11 +72,11 @@ const ATENDIMENTO_COLUMNS = [
   ['protocol_number', 'protocolo', 'VARCHAR(32)', 'raw'],
   ['external_number', 'externo', 'VARCHAR(64)', 'raw'],
   ['is_receptive', 'boleano_receptivo', 'TINYINT(1)', 'int'],
-  ['queue_duration', 'tempo_fila', 'TIME', 'time'],
-  ['service_duration', 'tempo_atendimento', 'TIME', 'time'],
-  ['pending_duration', 'tempo_pendencia', 'TIME', 'time'],
-  ['tmic', 'tmic', 'TIME', 'time'],
-  ['tmia', 'tmia', 'TIME', 'time'],
+  ['queue_duration', 'tempo_fila', 'BIGINT', 'duration'],
+  ['service_duration', 'tempo_atendimento', 'BIGINT', 'duration'],
+  ['pending_duration', 'tempo_pendencia', 'BIGINT', 'duration'],
+  ['tmic', 'tmic', 'BIGINT', 'duration'],
+  ['tmia', 'tmia', 'BIGINT', 'duration'],
   ['service_type', 'tipo_atendimento', 'VARCHAR(64)', 'raw'],
   ['service_level', 'nivel_servico', 'VARCHAR(32)', 'raw'],
   ['original_interaction_id', 'id_atendimento_referencia', 'BIGINT', 'int'],
@@ -69,24 +84,24 @@ const ATENDIMENTO_COLUMNS = [
   ['status', 'status', 'VARCHAR(64)', 'raw'],
   ['recurrence', 'recorrencia', 'VARCHAR(64)', 'raw'],
   ['contact_id', 'id_contato', 'BIGINT', 'int'],
-  ['contact_name', 'contato', 'VARCHAR(255)', 'raw'],
+  ['contact_name', 'contato', 'TEXT', 'raw'],
   ['phone', 'telefone', 'VARCHAR(32)', 'raw'],
   ['cpf_cnpj', 'cpf', 'VARCHAR(32)', 'raw'],
   ['cpf_cnpj_provided', 'cpf_informado', 'VARCHAR(32)', 'raw'],
-  ['email', 'email', 'VARCHAR(255)', 'raw'],
-  ['registration_number', 'matricula', 'VARCHAR(64)', 'raw'],
+  ['email', 'email', 'TEXT', 'raw'],
+  ['registration_number', 'matricula', 'TEXT', 'raw'],
   ['classification_id', 'id_classificacao', 'BIGINT', 'int'],
-  ['contact_classification', 'contato_classificacao', 'VARCHAR(32)', 'raw'],
-  ['agent_name', 'agente', 'VARCHAR(255)', 'raw'],
-  ['queue_path', 'descricao_caminho_completo', 'VARCHAR(255)', 'raw'],
-  ['service_name', 'servico', 'VARCHAR(255)', 'raw'],
+  ['contact_classification', 'contato_classificacao', 'VARCHAR(64)', 'raw'],
+  ['agent_name', 'agente', 'TEXT', 'raw'],
+  ['queue_path', 'descricao_caminho_completo', 'TEXT', 'raw'],
+  ['service_name', 'servico', 'TEXT', 'raw'],
   ['channel', 'tipo_integracao', 'VARCHAR(64)', 'raw'],
-  ['account_name', 'conta', 'VARCHAR(255)', 'raw'],
+  ['account_name', 'conta', 'TEXT', 'raw'],
   ['notes', 'descricao_observacao', 'TEXT', 'raw'],
   ['mood_id', 'id_humor', 'INT', 'int'],
   ['mood_icon', 'icone', 'VARCHAR(64)', 'raw'],
   ['mood', 'humor', 'VARCHAR(64)', 'raw'],
-  ['tag', 'tag', 'VARCHAR(255)', 'raw'],
+  ['tag', 'tag', 'TEXT', 'raw'],
   ['first_agent_message_at', 'data_prim_msg_agente', 'DATETIME', 'datetime'],
   ['last_agent_message_at', 'data_ulti_msg_agente', 'DATETIME', 'datetime'],
   ['first_auto_message_at', 'data_prim_msg_auto', 'DATETIME', 'datetime'],
@@ -99,6 +114,25 @@ const ATENDIMENTO_COLUMNS = [
   ['other_classifications', 'outras_classificacoes', 'JSON', 'json'],
 ];
 
+/**
+ * `protocol_number` e `agent_name` NAO vem da API de HSM - confirmado
+ * auditando o retorno cru da API (`/rest/v2/hsmEnviadas`) direto, sem
+ * cache, em 2305 linhas espalhadas por 11 datas e nas 3 categorias
+ * existentes (MARKETING, UTILITY, ALERT_UPDATE): nenhum campo com "prot"
+ * ou de agente no nome em nenhuma linha, so `cod_atendimento` (o ID interno
+ * do atendimento relacionado, ja mapeado como `interaction_id` abaixo). O
+ * numero de protocolo formatado (ex.: "68140003717366") e o nome do agente
+ * so existem na tabela de Atendimento - por isso essas colunas tem um
+ * resolver (5o elemento da tupla) em vez de virem direto de `row[apiField]`:
+ * sao preenchidas com um lookup por `interaction_id` na tabela de
+ * Atendimento no momento da escrita, ver CONTEXT_BUILDERS e o uso em
+ * replaceDayRows(). Ficam NULL para atendimentos ainda nao cacheados na
+ * tabela de Atendimento (ex.: fora do range ja alimentado).
+ *
+ * `HSM`/`Template` do CSV nativo da Matrix ja estao cobertos - sao
+ * `nom_hsm`/`template_name` (nome amigavel) e `cod_hsm`/`template_id`
+ * (codigo), so com nomes diferentes.
+ */
 const HSM_COLUMNS = [
   ['message_id', 'cod_mensagem', 'BIGINT', 'int'],
   ['sent_at', 'dat_msg', 'DATETIME', 'datetime'],
@@ -110,11 +144,48 @@ const HSM_COLUMNS = [
   ['status_id', 'cod_status', 'INT', 'int'],
   ['status', 'status', 'VARCHAR(64)', 'raw'],
   ['interaction_id', 'cod_atendimento', 'BIGINT', 'int'],
+  [
+    'protocol_number',
+    'protocolo',
+    'VARCHAR(32)',
+    'raw',
+    (row, ctx) => ctx.protocolByInteractionId?.get(String(row.cod_atendimento)) ?? null,
+  ],
+  [
+    'agent_name',
+    'agente',
+    'TEXT',
+    'raw',
+    (row, ctx) => ctx.agentNameByInteractionId?.get(String(row.cod_atendimento)) ?? null,
+  ],
   ['contact_name', 'nom_contato', 'VARCHAR(255)', 'raw'],
   ['phone', 'num_telefone', 'VARCHAR(32)', 'raw'],
   ['cpf', 'num_cpf', 'VARCHAR(32)', 'raw'],
   ['category', 'categoria', 'VARCHAR(64)', 'raw'],
 ];
+
+/**
+ * Contexto extra por tabela, calculado uma vez por chamada de
+ * replaceDayRows() (nao por linha) e passado ao resolver de colunas
+ * derivadas (ver `protocol_number`/`agent_name` acima). Aqui: mapas
+ * interaction_id -> protocol_number/agent_name, buscados em lote na tabela
+ * de Atendimento (mesmo schema compartilhado, mesma tabela que este
+ * servico ja e dono).
+ */
+const CONTEXT_BUILDERS = {
+  [TABLES.hsmEnviadas]: async (connection, rows) => {
+    const ids = [...new Set(rows.map((r) => Number(r.cod_atendimento)).filter(Number.isFinite))];
+    if (!ids.length) return { protocolByInteractionId: new Map(), agentNameByInteractionId: new Map() };
+    const [found] = await connection.query(
+      `SELECT interaction_id, protocol_number, agent_name FROM ${TABLES.atendimentoAnalitico} WHERE interaction_id IN (?)`,
+      [ids],
+    );
+    return {
+      protocolByInteractionId: new Map(found.map((r) => [String(r.interaction_id), r.protocol_number])),
+      agentNameByInteractionId: new Map(found.map((r) => [String(r.interaction_id), r.agent_name])),
+    };
+  },
+};
 
 /** Extra indices por tabela, alem do idx_report_date que toda tabela ja tem - colunas naturais de busca (id de negocio). */
 const EXTRA_INDEXES = {
@@ -170,6 +241,26 @@ function toLocalMidnight(value) {
   return new Date(year, month - 1, day);
 }
 
+/** "H...H:MM:SS" (parte de horas sem limite de digitos, pode passar de 838h) -> segundos totais (com sinal). */
+function parseDurationToSeconds(value) {
+  const m = String(value ?? '').match(/^(-?\d+):(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const [, h, min, sec] = m;
+  const sign = h.startsWith('-') ? -1 : 1;
+  return sign * (Math.abs(Number(h)) * 3600 + Number(min) * 60 + Number(sec));
+}
+
+/** Segundos totais -> "H...H:MM:SS", inverso exato de parseDurationToSeconds (mesma largura de horas, sem truncar). */
+function secondsToHms(totalSeconds) {
+  if (totalSeconds === null || totalSeconds === undefined) return null;
+  const sign = totalSeconds < 0 ? '-' : '';
+  const abs = Math.abs(totalSeconds);
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  const s = abs % 60;
+  return `${sign}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 function castForWrite(kind, value) {
   if (kind === 'json') return JSON.stringify(value ?? []);
   if (value === undefined || value === null || value === '') return null;
@@ -177,11 +268,13 @@ function castForWrite(kind, value) {
     const n = Number(value);
     return Number.isFinite(n) ? n : null;
   }
+  if (kind === 'duration') return parseDurationToSeconds(value);
   return value;
 }
 
 function castForRead(kind, value) {
   if (kind === 'json') return typeof value === 'string' ? JSON.parse(value) : (value ?? []);
+  if (kind === 'duration') return secondsToHms(value);
   return value;
 }
 
@@ -190,45 +283,101 @@ function selectExpr([col, , , kind]) {
   return kind === 'datetime' ? `DATE_FORMAT(${col}, '%Y-%m-%d %H:%i:%s') AS ${col}` : col;
 }
 
+/** "BIGINT"/"VARCHAR(32)"/"TINYINT(1)" -> "bigint"/"varchar"/"tinyint" - pra comparar com information_schema.DATA_TYPE, que nao inclui o tamanho/display-width. */
+function baseType(sqlType) {
+  return sqlType.split('(')[0].trim().toLowerCase();
+}
+
 /**
- * Cria a tabela (schema novo, colunas tipadas) se ainda nao existir.
+ * Compara o tipo declarado em `schema` com o DATA_TYPE real do information_schema.
  *
- * Migracao do schema antigo (coluna unica `payload JSON`): se a tabela ja
- * existir no formato antigo, ela e DROPADA e recriada no formato novo -
- * aprovado explicitamente porque estas tabelas sao SO um cache incremental
- * (nunca fonte da verdade, sempre reconstruivel a partir da API da Matrix -
- * ver getCacheBounds/replaceDayRows). O DROP so afeta a tabela EXATA
- * recebida em `table` (sempre um dos dois valores literais de TABLES, nunca
- * vindo de input externo) - nunca mexe em nenhuma outra tabela do schema
- * compartilhado (`API_WebDeveloper`), usado por outros projetos.
+ * MariaDB guarda JSON como LONGTEXT por baixo dos panos (JSON e so um alias
+ * de tipo, nao um tipo nativo de verdade como no MySQL) - sem essa excecao,
+ * a coluna `other_classifications` (declarada 'JSON') SEMPRE bateria como
+ * "tipo diferente" (declarado 'json' vs real 'longtext'), fazendo
+ * ensureTable() dropar e recriar a tabela inteira em TODA chamada, mesmo
+ * sem nenhuma mudanca de schema de verdade. Foi exatamente isso que
+ * aconteceu numa carga real: 1,6M linhas buscadas da API, mas cada dia
+ * processado dropava a tabela toda de novo antes do proprio INSERT (o dia
+ * anterior nunca sobrevivia) - resultado final, tabela vazia apesar do
+ * fetch inteiro ter funcionado.
+ */
+function typesMatch(declaredType, actualType) {
+  const declared = baseType(declaredType);
+  if (declared === actualType) return true;
+  if (declared === 'json' && actualType === 'longtext') return true;
+  return false;
+}
+
+/**
+ * Cria a tabela (schema novo, colunas tipadas) se ainda nao existir, ou
+ * evolui incrementalmente uma tabela ja existente para bater com `schema`.
+ *
+ * Tres casos de migracao, todos so afetam a tabela EXATA recebida em
+ * `table` (sempre um dos dois valores literais de TABLES, nunca vindo de
+ * input externo) - nunca mexem em nenhuma outra tabela do schema
+ * compartilhado (`API_WebDeveloper`), usado por outros projetos:
+ *
+ * 1. Schema antigo (coluna unica `payload JSON`) OU alguma coluna existente
+ *    com tipo diferente do declarado em `schema` (ex.: `service_duration`
+ *    era TIME, virou BIGINT depois que a primeira carga real mostrou
+ *    duracoes > 838h, fora do range do TIME): a tabela e DROPADA e recriada
+ *    do zero - aprovado explicitamente porque estas tabelas sao SO um cache
+ *    incremental (nunca fonte da verdade, sempre reconstruivel a partir da
+ *    API da Matrix - ver getCacheBounds/replaceDayRows). Sem esse check de
+ *    tipo, uma coluna que so muda de tipo (sem mudar de nome) passaria
+ *    batido pelo caso 2 abaixo e ficaria com o tipo antigo, quebrando o
+ *    INSERT (foi exatamente o que aconteceu testando esta migracao).
+ * 2. Schema novo mas faltando coluna(s) (ex.: `protocol_number`/`agent_name`
+ *    adicionados depois que a tabela ja existia): ADD COLUMN incremental,
+ *    sem perder os dados ja cacheados - linhas antigas ficam com a coluna
+ *    nova NULL ate a marca d'agua avancar de novo sobre elas.
  */
 async function ensureTable(db, table) {
   const schema = SCHEMAS[table];
   if (!schema) throw new Error(`[reportsDb] Schema desconhecido para a tabela ${table}`);
 
-  const [legacyCheck] = await db.query(
-    `SELECT COUNT(*) AS c FROM information_schema.COLUMNS
-     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'payload'`,
-    [table],
-  );
-  if (legacyCheck[0].c > 0) {
-    await db.query(`DROP TABLE ${table}`);
-  }
-
   const columnsDdl = schema.map(([col, , type]) => `${col} ${type} NULL`).join(',\n      ');
   const indexesDdl = (EXTRA_INDEXES[table] ?? [])
     .map(([name, col]) => `,\n      INDEX ${name} (${col})`)
     .join('');
-
-  await db.query(
-    `CREATE TABLE IF NOT EXISTS ${table} (
+  const createDdl = `CREATE TABLE ${table} (
       id BIGINT AUTO_INCREMENT PRIMARY KEY,
       report_date DATE NOT NULL,
       ${columnsDdl},
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_report_date (report_date)${indexesDdl}
-    )`,
+    )`;
+
+  const [existingCols] = await db.query(
+    `SELECT column_name AS name, data_type AS dataType FROM information_schema.COLUMNS
+     WHERE table_schema = DATABASE() AND table_name = ?`,
+    [table],
   );
+
+  if (!existingCols.length) {
+    await db.query(createDdl.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS'));
+    return;
+  }
+
+  const existingTypeByName = new Map(existingCols.map((c) => [c.name, c.dataType?.toLowerCase()]));
+  const hasLegacyPayload = existingTypeByName.has('payload');
+  const hasTypeMismatch = schema.some(([col, , type]) => {
+    const existingType = existingTypeByName.get(col);
+    return existingType && !typesMatch(type, existingType);
+  });
+
+  if (hasLegacyPayload || hasTypeMismatch) {
+    await db.query(`DROP TABLE ${table}`);
+    await db.query(createDdl);
+    return;
+  }
+
+  for (const [col, , type] of schema) {
+    if (!existingTypeByName.has(col)) {
+      await db.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${type} NULL`);
+    }
+  }
 }
 
 /**
@@ -321,6 +470,9 @@ export async function replaceDayRows(table, day, rows) {
     // teste manual com o banco temporariamente inacessivel).
     connection = await db.getConnection();
     await ensureTable(connection, table);
+    // Contexto de colunas derivadas (ex.: protocol_number do HSM, ver
+    // CONTEXT_BUILDERS) - so leitura, fora da transacao de escrita abaixo.
+    const ctx = (await CONTEXT_BUILDERS[table]?.(connection, rows)) ?? {};
     await connection.beginTransaction();
     await connection.query(`DELETE FROM ${table} WHERE report_date = ?`, [isoDay]);
     if (rows.length) {
@@ -328,7 +480,9 @@ export async function replaceDayRows(table, day, rows) {
       const insertColumns = ['report_date', ...columnNames].join(', ');
       const values = rows.map((row) => [
         isoDay,
-        ...schema.map(([, apiField, , kind]) => castForWrite(kind, row[apiField])),
+        ...schema.map(([, apiField, , kind, resolveWrite]) =>
+          castForWrite(kind, resolveWrite ? resolveWrite(row, ctx) : row[apiField]),
+        ),
       ]);
       await connection.query(`INSERT INTO ${table} (${insertColumns}) VALUES ?`, [values]);
     }
